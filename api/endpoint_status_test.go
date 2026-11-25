@@ -4,11 +4,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/TwiN/gatus/v5/config"
 	"github.com/TwiN/gatus/v5/config/endpoint"
+	"github.com/TwiN/gatus/v5/config/suite"
 	"github.com/TwiN/gatus/v5/storage"
 	"github.com/TwiN/gatus/v5/storage/store"
 	"github.com/TwiN/gatus/v5/watchdog"
@@ -162,7 +164,8 @@ func TestEndpointStatuses(t *testing.T) {
 	firstResult.Timestamp = time.Time{}
 	secondResult.Timestamp = time.Time{}
 	api := New(&config.Config{
-		Metrics: true,
+		Metrics:   true,
+		Endpoints: []*endpoint.Endpoint{&testEndpoint},
 		Storage: &storage.Config{
 			MaximumNumberOfResults: storage.DefaultMaximumNumberOfResults,
 			MaximumNumberOfEvents:  storage.DefaultMaximumNumberOfEvents,
@@ -227,5 +230,78 @@ func TestEndpointStatuses(t *testing.T) {
 				t.Errorf("expected:\n %s\n\ngot:\n %s", scenario.ExpectedBody, string(body))
 			}
 		})
+	}
+}
+
+func TestEndpointStatuses_FiltersUnconfiguredEndpoints(t *testing.T) {
+	defer store.Get().Clear()
+	defer cache.Clear()
+	activeEndpoint := &endpoint.Endpoint{
+		Name:  "active",
+		Group: "core",
+	}
+	externalEndpoint := &endpoint.ExternalEndpoint{
+		Name:  "ext",
+		Group: "core",
+		Token: "secret",
+	}
+	suiteEndpoint := &endpoint.Endpoint{
+		Name:  "sub",
+		Group: "core",
+	}
+	orphanedEndpoint := &endpoint.Endpoint{
+		Name:  "orphaned",
+		Group: "core",
+	}
+	watchdog.UpdateEndpointStatus(activeEndpoint, &endpoint.Result{Success: true, Duration: time.Millisecond, Timestamp: time.Now()})
+	watchdog.UpdateEndpointStatus(externalEndpoint.ToEndpoint(), &endpoint.Result{Success: true, Duration: time.Millisecond, Timestamp: time.Now()})
+	watchdog.UpdateEndpointStatus(suiteEndpoint, &endpoint.Result{Success: true, Duration: time.Millisecond, Timestamp: time.Now()})
+	watchdog.UpdateEndpointStatus(orphanedEndpoint, &endpoint.Result{Success: false, Duration: time.Millisecond, Timestamp: time.Now()})
+
+	cfg := &config.Config{
+		Endpoints:         []*endpoint.Endpoint{activeEndpoint},
+		ExternalEndpoints: []*endpoint.ExternalEndpoint{externalEndpoint},
+		Suites: []*suite.Suite{
+			{
+				Name:      "s1",
+				Group:     "core",
+				Endpoints: []*endpoint.Endpoint{suiteEndpoint},
+			},
+		},
+		Storage: &storage.Config{
+			MaximumNumberOfResults: storage.DefaultMaximumNumberOfResults,
+			MaximumNumberOfEvents:  storage.DefaultMaximumNumberOfEvents,
+		},
+	}
+	router := New(cfg).Router()
+
+	resp, err := router.Test(httptest.NewRequest("GET", "/api/v1/endpoints/statuses", http.NoBody))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+	for _, expectedKey := range []string{`"key":"core_active"`, `"key":"core_ext"`, `"key":"core_sub"`} {
+		if !strings.Contains(string(body), expectedKey) {
+			t.Errorf("expected response to contain %s, got: %s", expectedKey, string(body))
+		}
+	}
+	if strings.Contains(string(body), `"key":"core_orphaned"`) {
+		t.Errorf("expected response to exclude orphaned endpoint, got: %s", string(body))
+	}
+
+	respSingle, err := router.Test(httptest.NewRequest("GET", "/api/v1/endpoints/core_orphaned/statuses", http.NoBody))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer respSingle.Body.Close()
+	if respSingle.StatusCode != http.StatusNotFound {
+		t.Errorf("expected status 404 for orphaned endpoint, got %d", respSingle.StatusCode)
 	}
 }
