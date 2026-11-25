@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,6 +21,13 @@ const (
 	GatusConfigPathEnvVar = "GATUS_CONFIG_PATH"
 	GatusConfigFileEnvVar = "GATUS_CONFIG_FILE" // Deprecated in favor of GatusConfigPathEnvVar
 	GatusLogLevelEnvVar   = "GATUS_LOG_LEVEL"
+)
+
+var (
+	delayedPruneInterval = 60 * time.Second
+	delayedPruneMu       sync.Mutex
+	delayedPruneCancel   context.CancelFunc
+	delayedPruneWG       sync.WaitGroup
 )
 
 func main() {
@@ -52,14 +61,49 @@ func start(cfg *config.Config) {
 	go controller.Handle(cfg)
 	metrics.InitializePrometheusMetrics(cfg, nil)
 	watchdog.Monitor(cfg)
+	scheduleDelayedPrune(cfg)
 	go listenToConfigurationFileChanges(cfg)
 }
 
 func stop(cfg *config.Config) {
+	cancelDelayedPrune()
 	watchdog.Shutdown(cfg)
 	controller.Shutdown()
 	metrics.UnregisterPrometheusMetrics()
 	closeTunnels(cfg)
+}
+
+func scheduleDelayedPrune(cfg *config.Config) {
+	delayedPruneMu.Lock()
+	defer delayedPruneMu.Unlock()
+	if delayedPruneCancel != nil {
+		delayedPruneCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	delayedPruneCancel = cancel
+	delayedPruneWG.Add(1)
+	go func() {
+		defer delayedPruneWG.Done()
+		timer := time.NewTimer(delayedPruneInterval)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			pruneRemovedStatuses(cfg)
+		}
+	}()
+}
+
+func cancelDelayedPrune() {
+	delayedPruneMu.Lock()
+	cancel := delayedPruneCancel
+	delayedPruneCancel = nil
+	delayedPruneMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	delayedPruneWG.Wait()
 }
 
 func save() {
@@ -104,34 +148,7 @@ func initializeStorage(cfg *config.Config) {
 	if err != nil {
 		panic(err)
 	}
-	// Remove all SuiteStatuses that represent suites which no longer exist in the configuration
-	var suiteKeys []string
-	for _, suite := range cfg.Suites {
-		suiteKeys = append(suiteKeys, suite.Key())
-	}
-	numberOfSuiteStatusesDeleted := store.Get().DeleteAllSuiteStatusesNotInKeys(suiteKeys)
-	if numberOfSuiteStatusesDeleted > 0 {
-		logr.Infof("[main.initializeStorage] Deleted %d suite statuses because their matching suites no longer existed", numberOfSuiteStatusesDeleted)
-	}
-	// Remove all EndpointStatus that represent endpoints which no longer exist in the configuration
-	var keys []string
-	for _, ep := range cfg.Endpoints {
-		keys = append(keys, ep.Key())
-	}
-	for _, ee := range cfg.ExternalEndpoints {
-		keys = append(keys, ee.Key())
-	}
-	// Also add endpoints that are part of suites
-	for _, suite := range cfg.Suites {
-		for _, ep := range suite.Endpoints {
-			keys = append(keys, ep.Key())
-		}
-	}
-	logr.Infof("[main.initializeStorage] Total endpoint keys to preserve: %d", len(keys))
-	numberOfEndpointStatusesDeleted := store.Get().DeleteAllEndpointStatusesNotInKeys(keys)
-	if numberOfEndpointStatusesDeleted > 0 {
-		logr.Infof("[main.initializeStorage] Deleted %d endpoint statuses because their matching endpoints no longer existed", numberOfEndpointStatusesDeleted)
-	}
+	pruneRemovedStatuses(cfg)
 	// Clean up the triggered alerts from the storage provider and load valid triggered endpoint alerts
 	numberOfPersistedTriggeredAlertsLoaded := 0
 	for _, ep := range cfg.Endpoints {
@@ -212,6 +229,37 @@ func initializeStorage(cfg *config.Config) {
 	}
 	if numberOfPersistedTriggeredAlertsLoaded > 0 {
 		logr.Infof("[main.initializeStorage] Loaded %d persisted triggered alerts", numberOfPersistedTriggeredAlertsLoaded)
+	}
+}
+
+func pruneRemovedStatuses(cfg *config.Config) {
+	// Remove all SuiteStatuses that represent suites which no longer exist in the configuration
+	var suiteKeys []string
+	for _, suite := range cfg.Suites {
+		suiteKeys = append(suiteKeys, suite.Key())
+	}
+	numberOfSuiteStatusesDeleted := store.Get().DeleteAllSuiteStatusesNotInKeys(suiteKeys)
+	if numberOfSuiteStatusesDeleted > 0 {
+		logr.Infof("[main.pruneRemovedStatuses] Deleted %d suite statuses because their matching suites no longer existed", numberOfSuiteStatusesDeleted)
+	}
+	// Remove all EndpointStatus that represent endpoints which no longer exist in the configuration
+	var keys []string
+	for _, ep := range cfg.Endpoints {
+		keys = append(keys, ep.Key())
+	}
+	for _, ee := range cfg.ExternalEndpoints {
+		keys = append(keys, ee.Key())
+	}
+	// Also add endpoints that are part of suites
+	for _, suite := range cfg.Suites {
+		for _, ep := range suite.Endpoints {
+			keys = append(keys, ep.Key())
+		}
+	}
+	logr.Infof("[main.pruneRemovedStatuses] Total endpoint keys to preserve: %d", len(keys))
+	numberOfEndpointStatusesDeleted := store.Get().DeleteAllEndpointStatusesNotInKeys(keys)
+	if numberOfEndpointStatusesDeleted > 0 {
+		logr.Infof("[main.pruneRemovedStatuses] Deleted %d endpoint statuses because their matching endpoints no longer existed", numberOfEndpointStatusesDeleted)
 	}
 }
 

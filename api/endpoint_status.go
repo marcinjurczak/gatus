@@ -17,18 +17,43 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
+func configuredEndpointKeys(cfg *config.Config) map[string]struct{} {
+	keys := make(map[string]struct{}, len(cfg.Endpoints)+len(cfg.ExternalEndpoints))
+	for _, ep := range cfg.Endpoints {
+		keys[ep.Key()] = struct{}{}
+	}
+	for _, ee := range cfg.ExternalEndpoints {
+		keys[ee.Key()] = struct{}{}
+	}
+	for _, suite := range cfg.Suites {
+		for _, ep := range suite.Endpoints {
+			keys[ep.Key()] = struct{}{}
+		}
+	}
+	return keys
+}
+
 // EndpointStatuses handles requests to retrieve all EndpointStatus
 // Due to how intensive this operation can be on the storage, this function leverages a cache.
 func EndpointStatuses(cfg *config.Config) fiber.Handler {
+	allowedKeys := configuredEndpointKeys(cfg)
 	return func(c *fiber.Ctx) error {
 		page, pageSize := extractPageAndPageSizeFromRequest(c, cfg.Storage.MaximumNumberOfResults)
 		value, exists := cache.Get(fmt.Sprintf("endpoint-status-%d-%d", page, pageSize))
 		var data []byte
 		if !exists {
-			endpointStatuses, err := store.Get().GetAllEndpointStatuses(paging.NewEndpointStatusParams().WithResults(page, pageSize))
+			rawStatuses, err := store.Get().GetAllEndpointStatuses(paging.NewEndpointStatusParams().WithResults(page, pageSize))
 			if err != nil {
 				logr.Errorf("[api.EndpointStatuses] Failed to retrieve endpoint statuses: %s", err.Error())
 				return c.Status(500).SendString(err.Error())
+			}
+			// Filter out orphaned endpoint statuses not present in the active configuration
+			// (e.g., rows re-inserted by a terminating instance during a rolling update).
+			endpointStatuses := make([]*endpoint.Status, 0, len(rawStatuses))
+			for _, status := range rawStatuses {
+				if _, ok := allowedKeys[status.Key]; ok {
+					endpointStatuses = append(endpointStatuses, status)
+				}
 			}
 			// ALPHA: Retrieve endpoint statuses from remote instances
 			if endpointStatusesFromRemote, err := getEndpointStatusesFromRemoteInstances(cfg.Remote); err != nil {
@@ -85,12 +110,16 @@ func getEndpointStatusesFromRemoteInstances(remoteConfig *remote.Config) ([]*end
 
 // EndpointStatus retrieves a single endpoint.Status by group and endpoint name
 func EndpointStatus(cfg *config.Config) fiber.Handler {
+	allowedKeys := configuredEndpointKeys(cfg)
 	return func(c *fiber.Ctx) error {
 		page, pageSize := extractPageAndPageSizeFromRequest(c, cfg.Storage.MaximumNumberOfResults)
 		key, err := url.QueryUnescape(c.Params("key"))
 		if err != nil {
 			logr.Errorf("[api.EndpointStatus] Failed to decode key: %s", err.Error())
 			return c.Status(400).SendString("invalid key encoding")
+		}
+		if _, ok := allowedKeys[key]; !ok {
+			return c.Status(404).SendString(common.ErrEndpointNotFound.Error())
 		}
 		endpointStatus, err := store.Get().GetEndpointStatusByKey(key, paging.NewEndpointStatusParams().WithResults(page, pageSize).WithEvents(1, cfg.Storage.MaximumNumberOfEvents))
 		if err != nil {

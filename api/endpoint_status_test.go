@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -162,7 +163,8 @@ func TestEndpointStatuses(t *testing.T) {
 	firstResult.Timestamp = time.Time{}
 	secondResult.Timestamp = time.Time{}
 	api := New(&config.Config{
-		Metrics: true,
+		Metrics:   true,
+		Endpoints: []*endpoint.Endpoint{&testEndpoint},
 		Storage: &storage.Config{
 			MaximumNumberOfResults: storage.DefaultMaximumNumberOfResults,
 			MaximumNumberOfEvents:  storage.DefaultMaximumNumberOfEvents,
@@ -227,5 +229,57 @@ func TestEndpointStatuses(t *testing.T) {
 				t.Errorf("expected:\n %s\n\ngot:\n %s", scenario.ExpectedBody, string(body))
 			}
 		})
+	}
+}
+
+func TestEndpointStatuses_FiltersUnconfiguredEndpoints(t *testing.T) {
+	defer store.Get().Clear()
+	defer cache.Clear()
+	activeEndpoint := &endpoint.Endpoint{
+		Name:  "active",
+		Group: "core",
+	}
+	orphanedEndpoint := &endpoint.Endpoint{
+		Name:  "orphaned",
+		Group: "core",
+	}
+	watchdog.UpdateEndpointStatus(activeEndpoint, &endpoint.Result{Success: true, Duration: time.Millisecond, Timestamp: time.Now()})
+	watchdog.UpdateEndpointStatus(orphanedEndpoint, &endpoint.Result{Success: false, Duration: time.Millisecond, Timestamp: time.Now()})
+
+	cfg := &config.Config{
+		Endpoints: []*endpoint.Endpoint{activeEndpoint},
+		Storage: &storage.Config{
+			MaximumNumberOfResults: storage.DefaultMaximumNumberOfResults,
+			MaximumNumberOfEvents:  storage.DefaultMaximumNumberOfEvents,
+		},
+	}
+	router := New(cfg).Router()
+
+	resp, err := router.Test(httptest.NewRequest("GET", "/api/v1/endpoints/statuses", http.NoBody))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+	if !strings.Contains(string(body), `"key":"core_active"`) {
+		t.Errorf("expected response to contain active endpoint, got: %s", string(body))
+	}
+	if strings.Contains(string(body), `"key":"core_orphaned"`) {
+		t.Errorf("expected response to exclude orphaned endpoint, got: %s", string(body))
+	}
+
+	respSingle, err := router.Test(httptest.NewRequest("GET", "/api/v1/endpoints/core_orphaned/statuses", http.NoBody))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer respSingle.Body.Close()
+	if respSingle.StatusCode != http.StatusNotFound {
+		t.Errorf("expected status 404 for orphaned endpoint, got %d", respSingle.StatusCode)
 	}
 }
