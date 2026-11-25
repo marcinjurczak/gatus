@@ -427,14 +427,12 @@ func (s *Store) DeleteAllEndpointStatusesNotInKeys(keys []string) int {
 		logr.Errorf("[sql.DeleteAllEndpointStatusesNotInKeys] Failed to delete rows that do not belong to any of keys=%v: %s", keys, err.Error())
 		return 0
 	}
-	if s.writeThroughCache != nil {
-		// It's easier to just wipe out the entire cache than to try to find all keys that are not in the keys list
-		// This only happens on start and during tests, so it's fine for us to just clear the cache without worrying
-		// about performance
-		_ = s.writeThroughCache.DeleteKeysByPattern("*")
-	}
 	// Return number of rows deleted
 	rowsAffects, _ := result.RowsAffected()
+	if rowsAffects > 0 && s.writeThroughCache != nil {
+		// It's easier to just wipe out the entire cache than to try to find all keys that are not in the keys list
+		_ = s.writeThroughCache.DeleteKeysByPattern("*")
+	}
 	return int(rowsAffects)
 }
 

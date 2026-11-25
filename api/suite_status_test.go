@@ -381,6 +381,7 @@ func TestSuiteStatuses(t *testing.T) {
 	}
 	api := New(&config.Config{
 		Metrics: true,
+		Suites:  []*suite.Suite{&testSuite},
 		Storage: &storage.Config{
 			MaximumNumberOfResults: storage.DefaultMaximumNumberOfResults,
 			MaximumNumberOfEvents:  storage.DefaultMaximumNumberOfEvents,
@@ -498,6 +499,65 @@ func TestSuiteStatuses_NoSuitesInStoreButExistInConfig(t *testing.T) {
 	}
 	if contains(bodyStr, "disabled-suite") {
 		t.Error("Should not include disabled-suite in response")
+	}
+}
+
+func TestSuiteStatuses_FiltersUnconfiguredSuites(t *testing.T) {
+	defer store.Get().Clear()
+	defer cache.Clear()
+
+	orphanedSuite := &suite.Suite{
+		Name:  "orphaned-suite",
+		Group: "core",
+	}
+	newSuite := &suite.Suite{
+		Name:    "new-suite",
+		Group:   "core",
+		Enabled: boolPtr(true),
+	}
+	_ = store.Get().InsertSuiteResult(orphanedSuite, &suite.Result{
+		Name:      orphanedSuite.Name,
+		Group:     orphanedSuite.Group,
+		Success:   false,
+		Timestamp: time.Now(),
+	})
+
+	cfg := &config.Config{
+		Suites: []*suite.Suite{newSuite},
+		Storage: &storage.Config{
+			MaximumNumberOfResults: storage.DefaultMaximumNumberOfResults,
+			MaximumNumberOfEvents:  storage.DefaultMaximumNumberOfEvents,
+		},
+	}
+	router := New(cfg).Router()
+
+	resp, err := router.Test(httptest.NewRequest("GET", "/api/v1/suites/statuses", http.NoBody))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+	bodyStr := string(body)
+	if contains(bodyStr, "orphaned-suite") {
+		t.Errorf("expected response to exclude orphaned suite, got: %s", bodyStr)
+	}
+	if !contains(bodyStr, "new-suite") {
+		t.Errorf("expected empty-state fallback to include newly configured suite, got: %s", bodyStr)
+	}
+
+	respSingle, err := router.Test(httptest.NewRequest("GET", "/api/v1/suites/core_orphaned-suite/statuses", http.NoBody))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer respSingle.Body.Close()
+	if respSingle.StatusCode != http.StatusNotFound {
+		t.Errorf("expected status 404 for orphaned suite, got %d", respSingle.StatusCode)
 	}
 }
 

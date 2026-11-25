@@ -10,16 +10,32 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
+func configuredSuiteKeys(cfg *config.Config) map[string]struct{} {
+	allKeys := cfg.GetAllSuiteKeys()
+	keys := make(map[string]struct{}, len(allKeys))
+	for _, k := range allKeys {
+		keys[k] = struct{}{}
+	}
+	return keys
+}
+
 // SuiteStatuses handles requests to retrieve all suite statuses
 func SuiteStatuses(cfg *config.Config) fiber.Handler {
+	allowedKeys := configuredSuiteKeys(cfg)
 	return func(c *fiber.Ctx) error {
 		page, pageSize := extractPageAndPageSizeFromRequest(c, 100)
 		params := paging.NewSuiteStatusParams().WithPagination(page, pageSize)
-		suiteStatuses, err := store.Get().GetAllSuiteStatuses(params)
+		rawStatuses, err := store.Get().GetAllSuiteStatuses(params)
 		if err != nil {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"error": fmt.Sprintf("Failed to retrieve suite statuses: %v", err),
 			})
+		}
+		suiteStatuses := make([]*suite.Status, 0, len(rawStatuses))
+		for _, status := range rawStatuses {
+			if _, ok := allowedKeys[status.Key]; ok {
+				suiteStatuses = append(suiteStatuses, status)
+			}
 		}
 		// If no statuses exist yet, create empty ones from config
 		if len(suiteStatuses) == 0 {
@@ -35,9 +51,15 @@ func SuiteStatuses(cfg *config.Config) fiber.Handler {
 
 // SuiteStatus handles requests to retrieve a single suite's status
 func SuiteStatus(cfg *config.Config) fiber.Handler {
+	allowedKeys := configuredSuiteKeys(cfg)
 	return func(c *fiber.Ctx) error {
 		page, pageSize := extractPageAndPageSizeFromRequest(c, 100)
 		key := c.Params("key")
+		if _, ok := allowedKeys[key]; !ok {
+			return c.Status(404).JSON(fiber.Map{
+				"error": fmt.Sprintf("Suite with key '%s' not found", key),
+			})
+		}
 		params := paging.NewSuiteStatusParams().WithPagination(page, pageSize)
 		status, err := store.Get().GetSuiteStatusByKey(key, params)
 		if err != nil || status == nil {

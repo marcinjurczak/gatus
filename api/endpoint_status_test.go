@@ -10,6 +10,7 @@ import (
 
 	"github.com/TwiN/gatus/v5/config"
 	"github.com/TwiN/gatus/v5/config/endpoint"
+	"github.com/TwiN/gatus/v5/config/suite"
 	"github.com/TwiN/gatus/v5/storage"
 	"github.com/TwiN/gatus/v5/storage/store"
 	"github.com/TwiN/gatus/v5/watchdog"
@@ -239,15 +240,34 @@ func TestEndpointStatuses_FiltersUnconfiguredEndpoints(t *testing.T) {
 		Name:  "active",
 		Group: "core",
 	}
+	externalEndpoint := &endpoint.ExternalEndpoint{
+		Name:  "ext",
+		Group: "core",
+		Token: "secret",
+	}
+	suiteEndpoint := &endpoint.Endpoint{
+		Name:  "sub",
+		Group: "core",
+	}
 	orphanedEndpoint := &endpoint.Endpoint{
 		Name:  "orphaned",
 		Group: "core",
 	}
 	watchdog.UpdateEndpointStatus(activeEndpoint, &endpoint.Result{Success: true, Duration: time.Millisecond, Timestamp: time.Now()})
+	watchdog.UpdateEndpointStatus(externalEndpoint.ToEndpoint(), &endpoint.Result{Success: true, Duration: time.Millisecond, Timestamp: time.Now()})
+	watchdog.UpdateEndpointStatus(suiteEndpoint, &endpoint.Result{Success: true, Duration: time.Millisecond, Timestamp: time.Now()})
 	watchdog.UpdateEndpointStatus(orphanedEndpoint, &endpoint.Result{Success: false, Duration: time.Millisecond, Timestamp: time.Now()})
 
 	cfg := &config.Config{
-		Endpoints: []*endpoint.Endpoint{activeEndpoint},
+		Endpoints:         []*endpoint.Endpoint{activeEndpoint},
+		ExternalEndpoints: []*endpoint.ExternalEndpoint{externalEndpoint},
+		Suites: []*suite.Suite{
+			{
+				Name:      "s1",
+				Group:     "core",
+				Endpoints: []*endpoint.Endpoint{suiteEndpoint},
+			},
+		},
 		Storage: &storage.Config{
 			MaximumNumberOfResults: storage.DefaultMaximumNumberOfResults,
 			MaximumNumberOfEvents:  storage.DefaultMaximumNumberOfEvents,
@@ -267,8 +287,10 @@ func TestEndpointStatuses_FiltersUnconfiguredEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read response body: %v", err)
 	}
-	if !strings.Contains(string(body), `"key":"core_active"`) {
-		t.Errorf("expected response to contain active endpoint, got: %s", string(body))
+	for _, expectedKey := range []string{`"key":"core_active"`, `"key":"core_ext"`, `"key":"core_sub"`} {
+		if !strings.Contains(string(body), expectedKey) {
+			t.Errorf("expected response to contain %s, got: %s", expectedKey, string(body))
+		}
 	}
 	if strings.Contains(string(body), `"key":"core_orphaned"`) {
 		t.Errorf("expected response to exclude orphaned endpoint, got: %s", string(body))

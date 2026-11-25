@@ -12,6 +12,7 @@ import (
 	"github.com/TwiN/gatus/v5/config"
 	"github.com/TwiN/gatus/v5/controller"
 	"github.com/TwiN/gatus/v5/metrics"
+	"github.com/TwiN/gatus/v5/storage"
 	"github.com/TwiN/gatus/v5/storage/store"
 	"github.com/TwiN/gatus/v5/watchdog"
 	"github.com/TwiN/logr"
@@ -27,7 +28,7 @@ var (
 	delayedPruneInterval = 60 * time.Second
 	delayedPruneMu       sync.Mutex
 	delayedPruneCancel   context.CancelFunc
-	delayedPruneWG       sync.WaitGroup
+	delayedPruneDone     chan struct{}
 )
 
 func main() {
@@ -74,17 +75,22 @@ func stop(cfg *config.Config) {
 }
 
 func scheduleDelayedPrune(cfg *config.Config) {
-	delayedPruneMu.Lock()
-	defer delayedPruneMu.Unlock()
-	if delayedPruneCancel != nil {
-		delayedPruneCancel()
+	// Only schedule a delayed re-prune for persistent SQL backends where a terminating
+	// instance during a rolling update may write to the same database after startup.
+	if cfg.Storage == nil || cfg.Storage.Type == storage.TypeMemory || cfg.Storage.Type == "" {
+		return
 	}
+	cancelDelayedPrune()
+	delayedPruneMu.Lock()
+	interval := delayedPruneInterval
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	delayedPruneCancel = cancel
-	delayedPruneWG.Add(1)
+	delayedPruneDone = done
+	delayedPruneMu.Unlock()
 	go func() {
-		defer delayedPruneWG.Done()
-		timer := time.NewTimer(delayedPruneInterval)
+		defer close(done)
+		timer := time.NewTimer(interval)
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
@@ -98,12 +104,16 @@ func scheduleDelayedPrune(cfg *config.Config) {
 func cancelDelayedPrune() {
 	delayedPruneMu.Lock()
 	cancel := delayedPruneCancel
+	done := delayedPruneDone
 	delayedPruneCancel = nil
+	delayedPruneDone = nil
 	delayedPruneMu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
-	delayedPruneWG.Wait()
+	if done != nil {
+		<-done
+	}
 }
 
 func save() {
@@ -234,29 +244,14 @@ func initializeStorage(cfg *config.Config) {
 
 func pruneRemovedStatuses(cfg *config.Config) {
 	// Remove all SuiteStatuses that represent suites which no longer exist in the configuration
-	var suiteKeys []string
-	for _, suite := range cfg.Suites {
-		suiteKeys = append(suiteKeys, suite.Key())
-	}
+	suiteKeys := cfg.GetAllSuiteKeys()
 	numberOfSuiteStatusesDeleted := store.Get().DeleteAllSuiteStatusesNotInKeys(suiteKeys)
 	if numberOfSuiteStatusesDeleted > 0 {
 		logr.Infof("[main.pruneRemovedStatuses] Deleted %d suite statuses because their matching suites no longer existed", numberOfSuiteStatusesDeleted)
 	}
 	// Remove all EndpointStatus that represent endpoints which no longer exist in the configuration
-	var keys []string
-	for _, ep := range cfg.Endpoints {
-		keys = append(keys, ep.Key())
-	}
-	for _, ee := range cfg.ExternalEndpoints {
-		keys = append(keys, ee.Key())
-	}
-	// Also add endpoints that are part of suites
-	for _, suite := range cfg.Suites {
-		for _, ep := range suite.Endpoints {
-			keys = append(keys, ep.Key())
-		}
-	}
-	logr.Infof("[main.pruneRemovedStatuses] Total endpoint keys to preserve: %d", len(keys))
+	keys := cfg.GetAllEndpointKeys()
+	logr.Debugf("[main.pruneRemovedStatuses] Total endpoint keys to preserve: %d", len(keys))
 	numberOfEndpointStatusesDeleted := store.Get().DeleteAllEndpointStatusesNotInKeys(keys)
 	if numberOfEndpointStatusesDeleted > 0 {
 		logr.Infof("[main.pruneRemovedStatuses] Deleted %d endpoint statuses because their matching endpoints no longer existed", numberOfEndpointStatusesDeleted)

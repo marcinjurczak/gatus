@@ -169,6 +169,36 @@ func (config *Config) GetExternalEndpointByKey(key string) *endpoint.ExternalEnd
 	return nil
 }
 
+// GetAllEndpointKeys returns the keys of all configured endpoints, external endpoints, and suite endpoints
+func (config *Config) GetAllEndpointKeys() []string {
+	capacity := len(config.Endpoints) + len(config.ExternalEndpoints)
+	for _, s := range config.Suites {
+		capacity += len(s.Endpoints)
+	}
+	keys := make([]string, 0, capacity)
+	for _, ep := range config.Endpoints {
+		keys = append(keys, ep.Key())
+	}
+	for _, ee := range config.ExternalEndpoints {
+		keys = append(keys, ee.Key())
+	}
+	for _, s := range config.Suites {
+		for _, ep := range s.Endpoints {
+			keys = append(keys, ep.Key())
+		}
+	}
+	return keys
+}
+
+// GetAllSuiteKeys returns the keys of all configured suites
+func (config *Config) GetAllSuiteKeys() []string {
+	keys := make([]string, 0, len(config.Suites))
+	for _, s := range config.Suites {
+		keys = append(keys, s.Key())
+	}
+	return keys
+}
+
 // HasLoadedConfigurationBeenModified returns whether one of the file that the
 // configuration has been loaded from has been modified since it was last read
 func (config *Config) HasLoadedConfigurationBeenModified() bool {

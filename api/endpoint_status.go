@@ -18,17 +18,10 @@ import (
 )
 
 func configuredEndpointKeys(cfg *config.Config) map[string]struct{} {
-	keys := make(map[string]struct{}, len(cfg.Endpoints)+len(cfg.ExternalEndpoints))
-	for _, ep := range cfg.Endpoints {
-		keys[ep.Key()] = struct{}{}
-	}
-	for _, ee := range cfg.ExternalEndpoints {
-		keys[ee.Key()] = struct{}{}
-	}
-	for _, suite := range cfg.Suites {
-		for _, ep := range suite.Endpoints {
-			keys[ep.Key()] = struct{}{}
-		}
+	allKeys := cfg.GetAllEndpointKeys()
+	keys := make(map[string]struct{}, len(allKeys))
+	for _, k := range allKeys {
+		keys[k] = struct{}{}
 	}
 	return keys
 }
